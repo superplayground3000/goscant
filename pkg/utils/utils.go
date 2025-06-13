@@ -12,7 +12,7 @@ import (
 // CheckPrivileges warns if the process is not running with root/administrator rights.
 func CheckPrivileges(logger *log.Logger) {
 	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
-		logger.Println("[Security] - WARNING: Running as non-root. Raw socket mode (if implemented) will fail.")
+		logger.Fatalf("[Security] - FATAL: Running as non-root. Raw socket mode (if implemented) will fail.")
 	}
 }
 

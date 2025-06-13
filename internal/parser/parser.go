@@ -1,6 +1,7 @@
 package parser
 
 import (
+	// ... (imports remain the same)
 	"bufio"
 	"encoding/csv"
 	"fmt"
@@ -11,6 +12,49 @@ import (
 	"strconv"
 	"strings"
 )
+
+// CreateTargets combines IPs and ports into a final list of ScanTarget.
+func CreateTargets(ips []string, ports []int) []models.ScanTarget {
+	var targets []models.ScanTarget
+	for _, ip := range ips {
+		for _, port := range ports {
+			targets = append(targets, models.ScanTarget{IP: ip, Port: port})
+		}
+	}
+	return targets
+}
+
+// ParseIPs parses IP input from CIDR, file, or comma-separated list.
+func ParseIPs(input string) ([]string, error) {
+	// ... (implementation is the same as the old parseIPs)
+	if _, _, err := net.ParseCIDR(input); err == nil {
+		return parseCIDR(input)
+	}
+	if fileExists(input) {
+		return parseIPsFromFile(input)
+	}
+	// De-duplicate hosts from comma-separated list
+	hosts := strings.Split(input, ",")
+	seen := make(map[string]bool)
+	uniqueHosts := []string{}
+	for _, host := range hosts {
+		trimmedHost := strings.TrimSpace(host)
+		if !seen[trimmedHost] {
+			seen[trimmedHost] = true
+			uniqueHosts = append(uniqueHosts, trimmedHost)
+		}
+	}
+	return uniqueHosts, nil
+}
+
+// ParsePorts parses port input from ranges, file, or comma-separated list.
+func ParsePorts(input string) ([]int, error) {
+	// ... (implementation is the same as the old parsePorts)
+	if fileExists(input) {
+		return parsePortsFromFile(input)
+	}
+	return parsePortRange(input)
+}
 
 // ParseTargets orchestrates the parsing of both IP and port inputs into a list of ScanTarget.
 func ParseTargets(ipInput, portInput string) ([]models.ScanTarget, error) {
@@ -106,22 +150,34 @@ func parsePortRange(rangeStr string) ([]int, error) {
 // parseIPsFromFile reads IPs from a CSV or a plain text file.
 func parseIPsFromFile(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer file.Close()
 
 	var ips []string
 	if strings.HasSuffix(strings.ToLower(filePath), ".csv") {
 		reader := csv.NewReader(file)
 		records, err := reader.ReadAll()
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		for i, record := range records {
-			if i == 0 { continue } // Skip header
-			if len(record) > 0 { ips = append(ips, record[0]) }
+			if i == 0 {
+				continue
+			} // Skip header
+			if len(record) > 0 {
+				ips = append(ips, record[0])
+			}
 		}
 	} else {
 		scanner := bufio.NewScanner(file)
-		for scanner.Scan() { ips = append(ips, scanner.Text()) }
-		if err := scanner.Err(); err != nil { return nil, err }
+		for scanner.Scan() {
+			ips = append(ips, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
 	}
 	return ips, nil
 }
@@ -129,7 +185,9 @@ func parseIPsFromFile(filePath string) ([]string, error) {
 // parsePortsFromFile reads ports from a CSV or a plain text file.
 func parsePortsFromFile(filePath string) ([]int, error) {
 	file, err := os.Open(filePath)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer file.Close()
 
 	var ports []int
@@ -137,8 +195,12 @@ func parsePortsFromFile(filePath string) ([]int, error) {
 		r := csv.NewReader(file)
 		for {
 			record, err := r.Read()
-			if err == io.EOF { break }
-			if err != nil { return nil, err }
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
 			if len(record) > 1 {
 				portStr := strings.Split(record[1], "/")[0]
 				if port, err := strconv.Atoi(portStr); err == nil {
@@ -153,7 +215,9 @@ func parsePortsFromFile(filePath string) ([]int, error) {
 				ports = append(ports, port)
 			}
 		}
-		if err := scanner.Err(); err != nil { return nil, err }
+		if err := scanner.Err(); err != nil {
+			return nil, err
+		}
 	}
 	return ports, nil
 }
@@ -161,6 +225,8 @@ func parsePortsFromFile(filePath string) ([]int, error) {
 // fileExists checks if a file exists.
 func fileExists(filename string) bool {
 	info, err := os.Stat(filename)
-	if os.IsNotExist(err) { return false }
+	if os.IsNotExist(err) {
+		return false
+	}
 	return !info.IsDir()
 }
