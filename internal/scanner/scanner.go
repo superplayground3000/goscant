@@ -1,93 +1,99 @@
-// File: internal/scanner/scanner.go
 package scanner
 
 import (
-    "context"
-    "net"
-    "time"
-
-    "goscant/internal/config"
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"port-scanner/internal/models"
+	"sync"
+	"time"
 )
 
-// Status indicates probe outcome.
-type Status int
-
-const (
-    Open Status = iota
-    Closed
-    Filtered
-    Error
-)
-
-// Result captures probe data.
-type Result struct {
-    IP        string
-    Port      int
-    Status    Status
-    LatencyMS int64
-    Err       error
-}
-
-// Scanner defines one probe operation.
+// Scanner defines the interface for a port scanner engine.
 type Scanner interface {
-    Scan(ctx context.Context, ip string, port int) Result
+	Scan(target models.ScanTarget) models.ScanResult
 }
 
-// NewFactory returns concrete scanner.
-func NewFactory(cfg *config.Config, rawCapable bool) Scanner {
-    if rawCapable && !cfg.DryRun {
-        return NewRawScanner(cfg)
-    }
-    return NewSocketScanner(cfg)
+// ConnectScanner implements a full TCP three-way handshake scan.
+type ConnectScanner struct {
+	Timeout time.Duration
+	Logger  *log.Logger
 }
 
-// CheckRawSocketCapability checks runtime privilege.
-func CheckRawSocketCapability() bool {
-    // Simple attempt to open raw socket
-    conn, err := net.ListenPacket("ip4:tcp", "0.0.0.0")
-    if err != nil { return false }
-    conn.Close()
-    return true
+// NewConnectScanner creates a new instance of a ConnectScanner.
+func NewConnectScanner(timeout time.Duration, logger *log.Logger) *ConnectScanner {
+	return &ConnectScanner{Timeout: timeout, Logger: logger}
 }
 
-// ------ socket scanner --------
+// Scan performs a TCP connect scan on a single target.
+func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
+	startTime := time.Now()
+	address := fmt.Sprintf("%s:%d", target.IP, target.Port)
 
-type socketScanner struct {
-    timeout time.Duration
-    delay   time.Duration
+	conn, err := net.DialTimeout("tcp", address, s.Timeout)
+	latency := time.Since(startTime)
+
+	result := models.ScanResult{
+		Timestamp: startTime,
+		Target:    target,
+		Latency:   latency,
+	}
+
+	if err != nil {
+		result.Error = err
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			result.Status = models.StatusFiltered
+		} else {
+			result.Status = models.StatusClosed
+		}
+		return result
+	}
+
+	result.Status = models.StatusOpen
+	conn.Close() // Gracefully close the connection (four-way handshake).
+	return result
 }
 
-func NewSocketScanner(cfg *config.Config) Scanner {
-    return &socketScanner{timeout: cfg.Timeout, delay: cfg.Delay}
-}
+// Worker is a goroutine that pulls targets from a queue, scans them, and sends results.
+func Worker(ctx context.Context, wg *sync.WaitGroup, id int, s Scanner, tasks <-chan models.ScanTarget, results chan<- models.ScanResult, delay time.Duration, dryRun bool) {
+	defer wg.Done()
+	threadLogger := log.New(log.Writer(), fmt.Sprintf("[Thread %d] ", id), log.Flags())
+	threadLogger.Printf("- Worker started.")
 
-func (s *socketScanner) Scan(ctx context.Context, ip string, port int) Result {
-    addr := net.JoinHostPort(ip, strconv.Itoa(port))
-    start := time.Now()
-    d := net.Dialer{Timeout: s.timeout}
-    conn, err := d.DialContext(ctx, "tcp", addr)
-    if err != nil {
-        if errors.Is(err, context.DeadlineExceeded) {
-            return Result{IP: ip, Port: port, Status: Filtered, LatencyMS: s.timeout.Milliseconds(), Err: err}
-        }
-        return Result{IP: ip, Port: port, Status: Closed, LatencyMS: time.Since(start).Milliseconds(), Err: err}
-    }
-    conn.Close()
-    time.Sleep(s.delay)
-    return Result{IP: ip, Port: port, Status: Open, LatencyMS: time.Since(start).Milliseconds()}
-}
+	for {
+		select {
+		case target, ok := <-tasks:
+			if !ok {
+				threadLogger.Printf("- Task channel closed. Shutting down.")
+				return
+			}
 
-// ----- raw scanner skeleton -----
+			var result models.ScanResult
+			if dryRun {
+				threadLogger.Printf("- DRYRUN: %s:%d", target.IP, target.Port)
+				result = models.ScanResult{
+					Timestamp: time.Now(),
+					Target:    target,
+					Status:    models.StatusDryRun,
+				}
+			} else {
+				threadLogger.Printf("- Scanning %s:%d...", target.IP, target.Port)
+				result = s.Scan(target)
+				threadLogger.Printf("- Result for %s:%d is %s (%.2fms)",
+					target.IP, target.Port, result.Status, result.Latency.Seconds()*1000)
+			}
 
-func NewRawScanner(cfg *config.Config) Scanner {
-    return &rawScanner{cfg: cfg}
-}
-
-type rawScanner struct {
-    cfg *config.Config
-}
-
-func (r *rawScanner) Scan(ctx context.Context, ip string, port int) Result {
-    // TODO: implement full SYN, ACK, FIN handshake with gopacket.
-    return Result{IP: ip, Port: port, Status: Error, Err: errors.New("raw scanner not implemented")}
+			select {
+			case results <- result:
+			case <-ctx.Done():
+				threadLogger.Printf("- Context canceled. Dropping result for %s:%d.", target.IP, target.Port)
+				return
+			}
+			if delay > 0 { time.Sleep(delay) }
+		case <-ctx.Done():
+			threadLogger.Printf("- Shutdown signal received. Exiting.")
+			return
+		}
+	}
 }

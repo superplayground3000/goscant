@@ -1,19 +1,20 @@
-// File: internal/logger/logger.go
+// internal/logger/logger.go
 package logger
 
 import (
-    "log"
-    "os"
+	"fmt"
+	"io"
+	"log"
+	"os"
 )
 
-type Logger struct { *log.Logger }
-
-func New(path string) *Logger {
-    f, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-    mw := io.MultiWriter(os.Stdout, f)
-    return &Logger{log.New(mw, "", log.LstdFlags)}
+// New creates a logger that writes to both stdout and a log file.
+func New(logFilePath string) (*log.Logger, func()) {
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open log file %s: %v", logFilePath, err)
+	}
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	logger := log.New(multiWriter, "", log.LstdFlags)
+	return logger, func() { _ = logFile.Close() }
 }
-
-func (l *Logger) Debugf(format string, v ...interface{}) { l.Printf("DEBUG "+format, v...) }
-func (l *Logger) Info(msg string)                      { l.Println("INFO " + msg) }
-func (l *Logger) Warn(msg string)                      { l.Println("WARN " + msg) }
