@@ -2,7 +2,6 @@
 package utils
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"port-scanner/config"
@@ -19,7 +18,9 @@ func CheckPrivileges(logger *log.Logger) {
 
 // CheckFileDescriptorLimit warns if the worker count might exceed the open file limit on POSIX.
 func CheckFileDescriptorLimit(logger *log.Logger, cfg *config.Config) {
-	if runtime.GOOS == "windows" { return }
+	if runtime.GOOS == "windows" {
+		return
+	}
 	var rLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
 		if uint64(cfg.Workers) >= rLimit.Cur-100 { // 100 is a safety margin
