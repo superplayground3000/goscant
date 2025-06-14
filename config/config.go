@@ -22,6 +22,7 @@ type Config struct {
 	ScanType      string // new
 	Ping          bool   // new: to enable/disable pre-scan ping
 	MinSourcePort int
+	LogLevel      string // new: for slog level
 }
 
 // Load parses command-line flags and returns a populated Config struct.
@@ -40,6 +41,7 @@ func Load() (*Config, error) {
 	// New flags
 	scanType := flag.String("scantype", "connect", "Scan type: 'connect' for TCP Connect, 'syn' for SYN Stealth scan.")
 	ping := flag.Bool("ping", true, "Enable pre-scan ICMP check to filter for reachable hosts.")
+	logLevel := flag.String("loglevel", "INFO", "Set the logging level (DEBUG, INFO, WARN, ERROR).")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -78,6 +80,7 @@ func Load() (*Config, error) {
 		Ping:          *ping,
 		LogFile:       "portRunner.log",
 		MinSourcePort: 10000,
+		LogLevel:      *logLevel,
 	}
 
 	return cfg, nil

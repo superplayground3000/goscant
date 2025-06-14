@@ -3,7 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"port-scanner/internal/models"
 	"sync"
@@ -18,20 +18,22 @@ type Scanner interface {
 // ConnectScanner implements a full TCP three-way handshake scan.
 type ConnectScanner struct {
 	Timeout time.Duration
-	Logger  *log.Logger
+	Logger  *slog.Logger
 }
 
 // NewConnectScanner creates a new instance of a ConnectScanner.
-func NewConnectScanner(timeout time.Duration, logger *log.Logger) *ConnectScanner {
+func NewConnectScanner(timeout time.Duration, logger *slog.Logger) *ConnectScanner {
 	return &ConnectScanner{Timeout: timeout, Logger: logger}
 }
 
 // Scan performs a TCP connect scan on a single target.
 func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
+	s.Logger.Debug("Scanning target", "scanner", "ConnectScanner", "ip", target.IP, "port", target.Port)
 	startTime := time.Now()
 	address := fmt.Sprintf("%s:%d", target.IP, target.Port)
 
 	conn, err := net.DialTimeout("tcp", address, s.Timeout)
+	s.Logger.Debug("Dialing target", "scanner", "ConnectScanner", "address", address, "timeout", s.Timeout)
 	latency := time.Since(startTime)
 
 	result := models.ScanResult{
@@ -42,57 +44,64 @@ func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
 
 	if err != nil {
 		result.Error = err
+		s.Logger.Debug("Error scanning target", "scanner", "ConnectScanner", "address", address, "error", err)
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			result.Status = models.StatusFiltered
+			s.Logger.Debug("Target filtered (timeout)", "scanner", "ConnectScanner", "address", address)
 		} else {
 			result.Status = models.StatusClosed
+			s.Logger.Debug("Target closed (error)", "scanner", "ConnectScanner", "address", address, "error", err)
 		}
 		return result
 	}
 
 	result.Status = models.StatusOpen
+	s.Logger.Debug("Target open", "scanner", "ConnectScanner", "address", address)
 	conn.Close() // Gracefully close the connection (four-way handshake).
 	return result
 }
 
 // Worker is a goroutine that pulls targets from a queue, scans them, and sends results.
-func Worker(ctx context.Context, wg *sync.WaitGroup, id int, s Scanner, tasks <-chan models.ScanTarget, results chan<- models.ScanResult, delay time.Duration, dryRun bool) {
+func Worker(ctx context.Context, wg *sync.WaitGroup, id int, parentLogger *slog.Logger, s Scanner, tasks <-chan models.ScanTarget, results chan<- models.ScanResult, delay time.Duration, dryRun bool) {
 	defer wg.Done()
-	threadLogger := log.New(log.Writer(), fmt.Sprintf("[Thread %d] ", id), log.Flags())
-	threadLogger.Printf("- Worker started.")
+	// Create a child logger for this specific worker
+	workerLogger := parentLogger.With(slog.Int("worker_id", id))
+	workerLogger.Debug("Worker started.")
 
 	for {
 		select {
 		case target, ok := <-tasks:
 			if !ok {
-				threadLogger.Printf("- Task channel closed. Shutting down.")
+				workerLogger.Debug("Task channel closed. Shutting down.")
 				return
 			}
 
 			var result models.ScanResult
 			if dryRun {
-				threadLogger.Printf("- DRYRUN: %s:%d", target.IP, target.Port)
+				workerLogger.Info("Dry run for target", "ip", target.IP, "port", target.Port)
 				result = models.ScanResult{
 					Timestamp: time.Now(),
 					Target:    target,
 					Status:    models.StatusDryRun,
 				}
 			} else {
-				threadLogger.Printf("- Scanning %s:%d...", target.IP, target.Port)
+				workerLogger.Debug("Scanning target", "ip", target.IP, "port", target.Port)
 				result = s.Scan(target)
-				threadLogger.Printf("- Result for %s:%d is %s (%.2fms)",
-					target.IP, target.Port, result.Status, result.Latency.Seconds()*1000)
+				workerLogger.Debug("Scan result",
+					"ip", target.IP, "port", target.Port, "status", result.Status, "latency_ms", result.Latency.Seconds()*1000)
 			}
 
 			select {
 			case results <- result:
 			case <-ctx.Done():
-				threadLogger.Printf("- Context canceled. Dropping result for %s:%d.", target.IP, target.Port)
+				workerLogger.Warn("Context canceled. Dropping result for target.", "ip", target.IP, "port", target.Port)
 				return
 			}
-			if delay > 0 { time.Sleep(delay) }
+			if delay > 0 {
+				time.Sleep(delay)
+			}
 		case <-ctx.Done():
-			threadLogger.Printf("- Shutdown signal received. Exiting.")
+			workerLogger.Info("Shutdown signal received. Exiting.")
 			return
 		}
 	}

@@ -3,7 +3,7 @@ package pinger
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os/exec"
 	"runtime"
@@ -17,7 +17,7 @@ import (
 
 // FilterReachableHosts takes a slice of hosts, pings them concurrently,
 // and returns a new slice containing only the hosts that responded.
-func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, logger *log.Logger) []string {
+func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, parentLogger *slog.Logger) []string {
 	var reachableHosts []string
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -28,7 +28,8 @@ func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, lo
 	}
 	close(hostJobChan)
 
-	logger.Printf("[Pinger] - Starting reachability check for %d hosts with %d workers (timeout: %s)...", len(hosts), workers, timeout)
+	pingerLogger := parentLogger.With(slog.String("component", "pinger"))
+	pingerLogger.Info("Starting reachability check.", "host_count", len(hosts), "workers", workers, "timeout", timeout)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -41,9 +42,9 @@ func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, lo
 					mu.Lock()
 					reachableHosts = append(reachableHosts, host)
 					mu.Unlock()
-					logger.Printf("[Pinger] - SUCCESS: Host %s is reachable.", host)
+					pingerLogger.Debug("Host is reachable.", "host", host)
 				} else {
-					logger.Printf("[Pinger] - INFO: Host %s is unreachable or timed out, skipping.", host)
+					pingerLogger.Debug("Host is unreachable or timed out, skipping.", "host", host)
 				}
 				cancel()
 			}
@@ -51,7 +52,7 @@ func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, lo
 	}
 
 	wg.Wait()
-	logger.Printf("[Pinger] - Reachability check complete. %d of %d hosts are online.", len(reachableHosts), len(hosts))
+	pingerLogger.Info("Reachability check complete.", "reachable_hosts", len(reachableHosts), "total_hosts", len(hosts))
 	return reachableHosts
 }
 
