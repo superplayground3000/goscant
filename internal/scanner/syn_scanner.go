@@ -89,7 +89,7 @@ func (s *SynScanner) Scan(target models.ScanTarget) models.ScanResult {
 	}
 
 	// 4. Listen for response and send packet
-	listen, err := net.ListenPacket("ip4:tcp", "0.0.0.0")
+	listen, err := net.ListenPacket("ip4:tcp", "192.168.68.54")
 	if err != nil {
 		s.Logger.Error("Listener failed", "scanner", "SynScanner", "ip", target.IP, "port", target.Port, "error", err)
 		result.Status = models.StatusError

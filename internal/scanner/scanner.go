@@ -28,12 +28,25 @@ func NewConnectScanner(timeout time.Duration, logger *slog.Logger) *ConnectScann
 
 // Scan performs a TCP connect scan on a single target.
 func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
-	s.Logger.Debug("Scanning target", "scanner", "ConnectScanner", "ip", target.IP, "port", target.Port)
 	startTime := time.Now()
 	address := fmt.Sprintf("%s:%d", target.IP, target.Port)
 
-	conn, err := net.DialTimeout("tcp", address, s.Timeout)
-	s.Logger.Debug("Dialing target", "scanner", "ConnectScanner", "address", address, "timeout", s.Timeout)
+	s.Logger.Debug("Attempting to dial target",
+		"scanner", "ConnectScanner",
+		"target_ip", target.IP,
+		"target_port", target.Port,
+		"timeout", s.Timeout,
+	)
+
+	dialer := net.Dialer{
+		Timeout: s.Timeout,
+		// Let the OS choose the source IP and an unused source port.
+		// Port 0 means the OS will choose an ephemeral port.
+		// IP nil (or 0.0.0.0 / ::) means the OS will choose the source IP based on routing.
+		LocalAddr: &net.TCPAddr{Port: 0},
+	}
+
+	conn, err := dialer.DialContext(context.Background(), "tcp", address)
 	latency := time.Since(startTime)
 
 	result := models.ScanResult{
@@ -44,20 +57,44 @@ func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
 
 	if err != nil {
 		result.Error = err
-		s.Logger.Debug("Error scanning target", "scanner", "ConnectScanner", "address", address, "error", err)
+		s.Logger.Debug("Failed to dial target",
+			"scanner", "ConnectScanner",
+			"target_ip", target.IP,
+			"target_port", target.Port,
+			"error", err,
+			"latency_ms", latency.Seconds()*1000,
+		)
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			result.Status = models.StatusFiltered
-			s.Logger.Debug("Target filtered (timeout)", "scanner", "ConnectScanner", "address", address)
+			s.Logger.Debug("Target determined filtered (timeout)", "scanner", "ConnectScanner", "address", address)
 		} else {
 			result.Status = models.StatusClosed
-			s.Logger.Debug("Target closed (error)", "scanner", "ConnectScanner", "address", address, "error", err)
+			s.Logger.Debug("Target determined closed (connection error)", "scanner", "ConnectScanner", "address", address, "error", err)
 		}
 		return result
 	}
+	defer conn.Close() // Gracefully close the connection.
 
-	result.Status = models.StatusOpen
-	s.Logger.Debug("Target open", "scanner", "ConnectScanner", "address", address)
-	conn.Close() // Gracefully close the connection (four-way handshake).
+	localAddr, ok := conn.LocalAddr().(*net.TCPAddr)
+	if !ok {
+		// This is unlikely for a TCP connection but good to handle.
+		s.Logger.Warn("Could not assert LocalAddr to *net.TCPAddr after successful dial",
+			"scanner", "ConnectScanner",
+			"local_addr_type", fmt.Sprintf("%T", conn.LocalAddr()),
+			"local_addr_val", conn.LocalAddr().String(),
+		)
+		result.Status = models.StatusOpen // Still open, but source IP/port logging might be incomplete.
+	} else {
+		s.Logger.Debug("Successfully dialed target",
+			"scanner", "ConnectScanner",
+			"source_ip", localAddr.IP.String(),
+			"source_port", localAddr.Port,
+			"target_ip", target.IP,
+			"target_port", target.Port,
+			"latency_ms", latency.Seconds()*1000,
+		)
+		result.Status = models.StatusOpen
+	}
 	return result
 }
 
@@ -87,8 +124,8 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, id int, parentLogger *slog.
 			} else {
 				workerLogger.Debug("Scanning target", "ip", target.IP, "port", target.Port)
 				result = s.Scan(target)
-				workerLogger.Debug("Scan result",
-					"ip", target.IP, "port", target.Port, "status", result.Status, "latency_ms", result.Latency.Seconds()*1000)
+				// Detailed logging of source/target IP/port is now within the Scan method.
+				workerLogger.Debug("Scan result status", "ip", target.IP, "port", target.Port, "status", result.Status, "latency_ms", result.Latency.Seconds()*1000)
 			}
 
 			select {
