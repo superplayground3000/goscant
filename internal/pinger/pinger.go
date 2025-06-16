@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// pingHostFunc is a package-level variable that defaults to the actual Ping function.
+var pingHostFunc = Ping
+
 // FilterReachableHosts takes a slice of hosts, pings them concurrently,
 // and returns a new slice containing only the hosts that responded.
 func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, parentLogger *slog.Logger) []string {
@@ -32,7 +35,7 @@ func FilterReachableHosts(hosts []string, timeout time.Duration, workers int, pa
 			for host := range hostJobChan {
 				pingCtx, cancel := context.WithTimeout(context.Background(), timeout)
 
-				if Ping(pingCtx, host) {
+				if pingHostFunc(pingCtx, host) { // Use the mockable function variable
 					mu.Lock()
 					reachableHosts = append(reachableHosts, host)
 					mu.Unlock()

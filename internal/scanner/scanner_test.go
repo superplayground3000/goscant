@@ -133,7 +133,7 @@ func TestWorker(t *testing.T) {
 	wg.Add(1)
 	go Worker(context.Background(), &wg, 1, logger, mockScan, tasks, results, 0, false)
 
-	target := models.ScanTarget{IP: "127.0.0.1", Port: 80}
+	target := models.ScanTarget{IP: "127.0.0.1", Port: 8891}
 	tasks <- target
 
 	select {
