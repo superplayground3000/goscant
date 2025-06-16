@@ -33,8 +33,8 @@ func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
 
 	s.Logger.Debug("Attempting to dial target",
 		"scanner", "ConnectScanner",
-		"target_ip", target.IP,
-		"target_port", target.Port,
+		"ip", target.IP,
+		"port", target.Port,
 		"timeout", s.Timeout,
 	)
 
@@ -59,8 +59,8 @@ func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
 		result.Error = err
 		s.Logger.Debug("Failed to dial target",
 			"scanner", "ConnectScanner",
-			"target_ip", target.IP,
-			"target_port", target.Port,
+			"ip", target.IP,
+			"port", target.Port,
 			"error", err,
 			"latency_ms", latency.Seconds()*1000,
 		)
@@ -89,8 +89,8 @@ func (s *ConnectScanner) Scan(target models.ScanTarget) models.ScanResult {
 			"scanner", "ConnectScanner",
 			"source_ip", localAddr.IP.String(),
 			"source_port", localAddr.Port,
-			"target_ip", target.IP,
-			"target_port", target.Port,
+			"ip", target.IP,
+			"port", target.Port,
 			"latency_ms", latency.Seconds()*1000,
 		)
 		result.Status = models.StatusOpen

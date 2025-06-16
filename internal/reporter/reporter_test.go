@@ -1,34 +1,26 @@
 package reporter
 
 import (
-	"bytes"
 	"context"
 	"encoding/csv"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"port-scanner/internal/models"
+	"port-scanner/internal/testutils"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func setupTestLogger() (*slog.Logger, *bytes.Buffer) {
-	var logBuf bytes.Buffer
-	handler := slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	logger := slog.New(handler)
-	return logger, &logBuf
-}
-
 func TestReporter_Run(t *testing.T) {
-	logger, logBuf := setupTestLogger()
+	logger, logBuf := testutils.SetupTestLogger()
 	tempDir := t.TempDir()
 	outputFile := filepath.Join(tempDir, "results.csv")
 
-	resultsChan := make(chan models.ScanResult, 3)
+	resultsChan := make(chan models.ScanResult, 3) // Buffered channel
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -36,6 +28,7 @@ func TestReporter_Run(t *testing.T) {
 	reporter := New(ctx, &wg, resultsChan, outputFile, logger)
 
 	wg.Add(1)
+	// The reporter goroutine will handle file creation errors internally now
 	go reporter.Run()
 
 	// Send some results
@@ -86,8 +79,11 @@ func TestReporter_Run(t *testing.T) {
 	}
 
 	// Check logs (optional, basic check)
-	if !strings.Contains(logBuf.String(), "Reporter started.") {
-		t.Errorf("Expected log message 'Reporter started.' not found. Logs:\n%s", logBuf.String())
+	// Check for the message "Started." and that it's from the "reporter" component.
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "msg=Started.") || !strings.Contains(logOutput, "component=reporter") {
+		t.Errorf("Expected log message 'msg=Started.' from 'component=reporter' not found. Logs:\n%s", logOutput)
+
 	}
 	if !strings.Contains(logBuf.String(), "Results channel closed. Shutting down.") {
 		t.Errorf("Expected log message 'Results channel closed. Shutting down.' not found. Logs:\n%s", logBuf.String())
@@ -95,7 +91,7 @@ func TestReporter_Run(t *testing.T) {
 }
 
 func TestReporter_Run_ContextCancel(t *testing.T) {
-	logger, _ := setupTestLogger()
+	logger, _ := testutils.SetupTestLogger()
 	tempDir := t.TempDir()
 	outputFile := filepath.Join(tempDir, "results.csv")
 
@@ -140,7 +136,7 @@ func TestReporter_Run_ContextCancel(t *testing.T) {
 }
 
 func equalSlices(a, b []string) bool {
-	if len(a) != len(b) {
+	if len(a) != len(b) { // Check length first
 		return false
 	}
 	for i := range a {

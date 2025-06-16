@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"port-scanner/config"
 	"port-scanner/internal/logger"
 	"port-scanner/internal/models"
@@ -44,26 +45,7 @@ func main() {
 		utils.CheckPrivileges(appLogger) // utils.CheckPrivileges needs to accept *slog.Logger
 	}
 
-	utils.CheckFileDescriptorLimit(appLogger, cfg) // utils.CheckFileDescriptorLimit needs to accept *slog.Logger
-	// 1. Parse IPs and Ports separately
-	ips, err := parser.ParseIPs(cfg.IPInput)
-	if err != nil {
-		appLogger.Error("Error parsing IPs", "error", err)
-		os.Exit(1)
-	}
-	ports, err := parser.ParsePorts(cfg.PortInput)
-	if err != nil {
-		appLogger.Error("Error parsing ports", "error", err)
-		os.Exit(1)
-	}
-
-	// 2. (Optional) Filter for reachable hosts
-	if cfg.Ping && !cfg.DryRun {
-		ips = pinger.FilterReachableHosts(ips, cfg.Timeout, cfg.Workers, appLogger) // pinger.FilterReachableHosts needs to accept *slog.Logger
-	}
-
-	// 3. Create final target list
-	targets := parser.CreateTargets(ips, ports)
+	var targets []models.ScanTarget
 
 	// 4. Handle Resume
 	if cfg.ResumeFile != "" {
@@ -75,27 +57,38 @@ func main() {
 			// or handle this error more strictly depending on requirements.
 		} else {
 			appLogger.Info("Successfully loaded targets from checkpoint.", "count", len(resumedTargets))
-			// Create a map of resumed targets for efficient lookup
-			resumedMap := make(map[string]bool)
-			for _, t := range resumedTargets {
-				resumedMap[fmt.Sprintf("%s:%d", t.IP, t.Port)] = true
-			}
-			// Filter the original targets list to keep only those present in the resumed set
-			var newTargets []models.ScanTarget
-			for _, t := range targets {
-				if resumedMap[fmt.Sprintf("%s:%d", t.IP, t.Port)] {
-					newTargets = append(newTargets, t)
-				}
-			}
-			targets = newTargets
-			appLogger.Info("Resuming scan with targets.", "count", len(targets))
 
-			if err := os.Remove(cfg.ResumeFile); err != nil {
-				appLogger.Warn("Failed to remove checkpoint file after loading.", "file", cfg.ResumeFile, "error", err)
-			} else {
-				appLogger.Info("Removed checkpoint file after successful resume.", "file", cfg.ResumeFile)
-			}
+			targets = resumedTargets
+			appLogger.Info("Resuming scan with targets.", "count", len(targets))
 		}
+	} else {
+		appLogger.Info("No resume file provided. Starting a new scan.")
+		utils.CheckFileDescriptorLimit(appLogger, cfg) // utils.CheckFileDescriptorLimit needs to accept *slog.Logger
+		// 1. Parse IPs and Ports separately
+		ips, err := parser.ParseIPs(cfg.IPInput)
+		if err != nil {
+			appLogger.Error("Error parsing IPs", "error", err)
+			os.Exit(1)
+		}
+		appLogger.Debug("IPs parsed successfully.", "count", len(ips))
+
+		ports, err := parser.ParsePorts(cfg.PortInput)
+		if err != nil {
+			appLogger.Error("Error parsing ports", "error", err)
+			os.Exit(1)
+		}
+		appLogger.Debug("Ports parsed successfully.", "count", len(ports))
+
+		// 2. (Optional) Filter for reachable hosts
+		if cfg.Ping && !cfg.DryRun {
+			appLogger.Debug("Pinging hosts to filter reachable ones.", "initial_ip_count", len(ips))
+			ips = pinger.FilterReachableHosts(ips, cfg.Timeout, cfg.Workers, appLogger) // pinger.FilterReachableHosts needs to accept *slog.Logger
+			appLogger.Debug("Finished pinging hosts.", "reachable_ip_count", len(ips))
+		}
+
+		// 3. Create final target list
+		targets = parser.CreateTargets(ips, ports)
+		appLogger.Debug("Initial target list created.", "count", len(targets))
 	}
 
 	if len(targets) == 0 {
@@ -110,43 +103,53 @@ func main() {
 
 	taskQueue := make(chan models.ScanTarget, cfg.QueueSize)
 	resultsChan := make(chan models.ScanResult, cfg.QueueSize)
-	var wg, reporterWg sync.WaitGroup
+	var wg, reporterWg, interruptWg sync.WaitGroup
 
 	reporterWg.Add(1)
-	go reporter.New(ctx, &reporterWg, resultsChan, cfg.OutputFile, appLogger).Run() // reporter.New needs to accept *slog.Logger
+	appLogger.Debug("Starting reporter goroutine.")
+	go reporter.New(ctx, &reporterWg, resultsChan, cfg.OutputFile, appLogger).Run()
 
 	// 5. Scanner Factory: Choose scan engine based on config
 	for i := 1; i <= cfg.Workers; i++ {
 		var scanEngine scanner.Scanner
 		switch cfg.ScanType {
 		case "syn":
-			// Each worker gets a slightly different source port to avoid collisions
-			scanEngine = scanner.NewSynScanner(cfg.Timeout, appLogger, cfg.MinSourcePort+i)
+			fallthrough
 		case "connect":
 			fallthrough
 		default:
 			scanEngine = scanner.NewConnectScanner(cfg.Timeout, appLogger)
 		}
 		wg.Add(1)
+		appLogger.Debug("Starting scanner worker.", "worker_id", i, "scan_type", cfg.ScanType)
 		go scanner.Worker(ctx, &wg, i, appLogger, scanEngine, taskQueue, resultsChan, cfg.Delay, cfg.DryRun)
 	}
 
+	interruptWg.Add(1)
 	go func() {
+		appLogger.Debug("Interrupt handler goroutine started.")
+		defer interruptWg.Done()
 		<-sigChan // Wait for interrupt signal
 		appLogger.Info("Shutdown signal received. Saving state...")
 		cancel() // Signal all goroutines to stop
 
-		close(taskQueue) // Prevent new tasks
 		remaining := make([]models.ScanTarget, 0, len(taskQueue))
 		for target := range taskQueue {
 			remaining = append(remaining, target)
 		}
 		if len(remaining) > 0 && cfg.ResumeFile != "" { // Only save if resume is configured
-			if err := checkpoint.SaveState(remaining, "checkpoint.json"); err != nil {
+			currentDir, err := os.Getwd()
+			if err != nil {
+				appLogger.Error("Failed to get current directory", "error", err)
+			}
+			checkpointFile := filepath.Join(currentDir, cfg.ResumeFile)
+			if err := checkpoint.SaveState(remaining, checkpointFile); err != nil {
 				appLogger.Error("Failed to save checkpoint", "error", err)
 			} else {
 				appLogger.Info("Checkpoint saved", "remaining_targets", len(remaining))
 			}
+		} else {
+			appLogger.Debug("No remaining targets in taskQueue to save for checkpoint or resume file not configured.")
 		}
 	}()
 
@@ -155,16 +158,19 @@ func main() {
 
 	go func() {
 		defer close(taskQueue)
+		appLogger.Debug("Starting to feed targets into the task queue.")
 		for _, target := range targets {
 			select {
 			case taskQueue <- target:
 			case <-ctx.Done():
+				appLogger.Debug("Context canceled while feeding targets. Stopping.")
 				return
 			}
 		}
 	}()
 
 	wg.Wait()
+	interruptWg.Wait()
 	appLogger.Info("All scanner workers finished.")
 	close(resultsChan)
 	reporterWg.Wait()

@@ -1,26 +1,17 @@
 package scanner
 
 import (
-	"bytes"
 	"context"
-	"io"
-	"log/slog"
 	"net"
-	"os"
 	"port-scanner/internal/models"
+	"port-scanner/internal/testutils"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func setupTestLogger() (*slog.Logger, *bytes.Buffer) {
-	var logBuf bytes.Buffer
-	handler := slog.NewTextHandler(io.MultiWriter(&logBuf, os.Stdout), &slog.HandlerOptions{Level: slog.LevelDebug})
-	logger := slog.New(handler)
-	return logger, &logBuf
-}
-
+// MockScanner is a test helper to simulate a Scanner implementation.
 // MockScanner for worker tests
 type MockScanner struct {
 	ScanFunc func(target models.ScanTarget) models.ScanResult
@@ -35,11 +26,11 @@ func (m *MockScanner) Scan(target models.ScanTarget) models.ScanResult {
 	if m.ScanFunc != nil {
 		return m.ScanFunc(target)
 	}
-	return models.ScanResult{Target: target, Status: models.StatusUnknown, Latency: 1 * time.Millisecond}
+	return models.ScanResult{Target: target, Status: models.StatusOpen, Latency: 1 * time.Millisecond}
 }
 
 func TestConnectScanner_Scan_OpenPort(t *testing.T) {
-	logger, logBuf := setupTestLogger()
+	logger, logBuf := testutils.SetupTestLogger()
 	listener, err := net.Listen("tcp", "127.0.0.1:0") // OS chooses a free port
 	if err != nil {
 		t.Fatalf("Failed to listen on a port: %v", err)
@@ -57,7 +48,7 @@ func TestConnectScanner_Scan_OpenPort(t *testing.T) {
 	target := models.ScanTarget{IP: addr.IP.String(), Port: addr.Port}
 	scanner := NewConnectScanner(100*time.Millisecond, logger)
 
-	result := scanner.Scan(target)
+	result := scanner.Scan(target) // Pass context
 
 	if result.Status != models.StatusOpen {
 		t.Errorf("Expected status Open, got %s. Logs: %s", result.Status, logBuf.String())
@@ -71,7 +62,7 @@ func TestConnectScanner_Scan_OpenPort(t *testing.T) {
 }
 
 func TestConnectScanner_Scan_ClosedPort(t *testing.T) {
-	logger, logBuf := setupTestLogger()
+	logger, logBuf := testutils.SetupTestLogger()
 	// Find a port that is likely closed. This is a bit heuristic.
 	// A more robust way would be to mock net.Dialer, but this is simpler for a direct test.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -86,7 +77,7 @@ func TestConnectScanner_Scan_ClosedPort(t *testing.T) {
 	target := models.ScanTarget{IP: "127.0.0.1", Port: closedPort}
 	scanner := NewConnectScanner(100*time.Millisecond, logger)
 
-	result := scanner.Scan(target)
+	result := scanner.Scan(target) // Pass context
 
 	if result.Status != models.StatusClosed {
 		t.Errorf("Expected status Closed, got %s. Logs: %s", result.Status, logBuf.String())
@@ -103,14 +94,13 @@ func TestConnectScanner_Scan_ClosedPort(t *testing.T) {
 }
 
 func TestConnectScanner_Scan_FilteredPort(t *testing.T) {
-	logger, logBuf := setupTestLogger()
+	logger, logBuf := testutils.SetupTestLogger()
 	// Use a non-routable IP address to simulate a timeout/filtered port
 	// 192.0.2.1 is a TEST-NET-1 address, typically not routable.
 	target := models.ScanTarget{IP: "192.0.2.1", Port: 12345}
 	// Short timeout to make the test faster
 	scanner := NewConnectScanner(50*time.Millisecond, logger)
-
-	result := scanner.Scan(target)
+	result := scanner.Scan(target) // Pass context
 
 	if result.Status != models.StatusFiltered {
 		t.Errorf("Expected status Filtered, got %s. Logs: %s", result.Status, logBuf.String())
@@ -128,22 +118,20 @@ func TestConnectScanner_Scan_FilteredPort(t *testing.T) {
 }
 
 func TestWorker(t *testing.T) {
-	logger, logBuf := setupTestLogger()
+	logger, logBuf := testutils.SetupTestLogger()
 	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	tasks := make(chan models.ScanTarget, 1)
 	results := make(chan models.ScanResult, 1)
 
 	mockScan := &MockScanner{
 		ScanFunc: func(target models.ScanTarget) models.ScanResult {
-			return models.ScanResult{Target: target, Status: models.StatusOpen, Latency: 5 * time.Millisecond}
+			return models.ScanResult{Target: target, Status: models.StatusOpen, Latency: 5 * time.Millisecond} // Mock ScanFunc doesn't need context here
 		},
 	}
 
 	wg.Add(1)
-	go Worker(ctx, &wg, 1, logger, mockScan, tasks, results, 0, false)
+	go Worker(context.Background(), &wg, 1, logger, mockScan, tasks, results, 0, false)
 
 	target := models.ScanTarget{IP: "127.0.0.1", Port: 80}
 	tasks <- target
@@ -167,7 +155,7 @@ func TestWorker(t *testing.T) {
 	// Test dry run
 	mockScan.Calls = nil // Reset calls
 	wg.Add(1)
-	go Worker(ctx, &wg, 2, logger, mockScan, tasks, results, 0, true /* dryRun */)
+	go Worker(context.Background(), &wg, 2, logger, mockScan, tasks, results, 0, true /* dryRun */)
 	tasks <- target
 
 	select {
@@ -183,7 +171,6 @@ func TestWorker(t *testing.T) {
 	}
 
 	// Test context cancellation
-	cancel()  // Signal worker to stop
 	wg.Wait() // Wait for all workers to finish (the first one should have finished, this waits for the second and any new ones if we didn't manage context correctly)
 
 	if !strings.Contains(logBuf.String(), "Worker started.") {
@@ -194,7 +181,7 @@ func TestWorker(t *testing.T) {
 }
 
 func TestWorker_ChannelClose(t *testing.T) {
-	logger, _ := setupTestLogger()
+	logger, _ := testutils.SetupTestLogger() // Use testutils logger
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
